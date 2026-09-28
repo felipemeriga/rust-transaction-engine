@@ -7,3 +7,6 @@ CHALLENGE.md
 .npmrc
 .DS_Store
 screenshots/
+
+# local working documents — not part of the deliverable
+docs/superpowers/
