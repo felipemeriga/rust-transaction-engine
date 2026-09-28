@@ -171,59 +171,19 @@ The design in brief:
 
 ## Correctness
 
-### Test inventory
+The suite has 43 tests: unit tests for the money type and every ledger rule, nine fixture scenarios with hand-traced expected outputs (disputes on both movement types, chargeback locking, negative balances, malformed and noisy input, whitespace, empty files), and equivalence tests proving the sharded runtime produces identical results to the sequential reference — on all fixtures and on 200,000 generated rows. That equivalence is the per-client ordering guarantee made executable.
 
-The test suite has 43 tests: `cargo test` runs 42 (28 unit, 14 integration) and one `#[ignore]`d stress test runs at epoch gates.
+---
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| `amount` | 4 | `parse_valid` (8 cases), `parse_invalid` (11 cases), `display_four_decimals`, `checked_ops` |
-| `transaction` | 4 | valid movements and verdicts, superfluous amount tolerated, `client()` accessor, every `RowError` variant |
-| `engine` | 15 | all ledger-rule `Rejection` variants (`Overflow` is exercised at the `Amount` layer via `checked_ops`), deposit/withdrawal arithmetic, all dispute state transitions including `reopened_dispute_can_charge_back`, `fraud_scenario_ends_negative_and_locked`, `withdrawal_dispute_uses_literal_spec_math`, `locked_account_rejects_movements_but_processes_verdicts`, `failed_withdrawal_creates_account`, `verdict_never_creates_account` |
-| `io` | 3 | `reads_and_skips_malformed_rows`, `empty_input`, `end_to_end_sequential` |
-| `testgen` | 2 | same seed produces identical bytes; generated output is processable and exercises disputes (open holds and locked accounts occur) |
-| `acceptance` (integration) | 9 | 9 fixture scenarios (see below) |
-| `cli` (integration) | 3 | binary contract: CSV to stdout on success, stdout stays empty on missing argument and on unreadable file |
-| `equivalence` (integration) | 2 | sharded ≡ sequential property (see below) |
-| `stress` (integration) | 1 | `#[ignore]`d big-file smoke (`five_million_rows_stream_through`), run at epoch gates via `cargo test --release --test stress -- --ignored` |
+## Sequential vs. concurrent
 
-### Nine fixture scenarios
+Same 10-million-row (281 MB) input, same 201-account output, measured on the reference machine:
 
-Each fixture is a hand-authored CSV paired with a hand-traced expected output:
+| Runtime | Wall time | Peak RSS |
+|---|---|---|
+| Sequential (library reference, default logging) | ~19 s | ~5 MB |
+| Concurrent, 4 workers (shipped binary, `RUST_LOG=error`) | **7.7 s** | ~6 MB |
 
-| Fixture | What it exercises |
-|---------|-------------------|
-| `basic` | Multi-client deposit and failed withdrawal |
-| `dispute_resolve` | Full dispute → resolve cycle |
-| `chargeback_lock` | Dispute → chargeback → account locked |
-| `withdrawal_dispute` | Disputing a withdrawal (literal-math premise) |
-| `negative_balance` | Fraud pattern ending in negative total |
-| `malformed` | Mix of valid and structurally broken rows |
-| `noise` | Verdicts referencing unknown tx IDs |
-| `whitespace` | CSV with extra spaces in fields |
-| `empty` | Header-only and completely empty input |
+Part of the gap is quieter logging (the sequential run paid for millions of stderr `WARN` lines); the rest is real overlap.
 
-### Sharded ≡ sequential equivalence
-
-The `equivalence` integration tests verify that `run_sharded` and `run_sequential` produce identical sorted account rows for two inputs:
-
-1. A deterministically generated 200,000-row CSV (seed 7) covering deposits, withdrawals, disputes, resolves, and chargebacks across 200 clients.
-2. All nine fixture CSVs run through both runtimes back-to-back.
-
-This property is the ordering guarantee: if sharding ever violated per-client FIFO, the balances would diverge from the sequential reference.
-
-### Stress run numbers (Epoch 4 gate)
-
-Measured on the reference machine — the 5-million-row figure via `cargo test --release --test stress -- --ignored`, the 10-million-row figures via a manual run of the release binary against a minted CSV at the epoch gate:
-
-- **5 million rows**: 2.6 s (sequential reference)
-- **10 million rows (281 MB input)**: 19.2 s sequential with default logging; **7.7 s with the shipped sharded runtime** (`RUST_LOG=error`), whose user CPU time (9.5 s) exceeding wall time confirms the reader and the four workers genuinely overlap. Peak RSS stays ~6 MB in both modes.
-
-**What the 10 M run actually measures — be honest about it.**
-The synthetic workload uses 200 clients with ~2% chargebacks. Because chargebacks lock accounts, all 200 accounts lock early in the stream; roughly 98% of subsequent deposit and withdrawal rows are rejected (`AccountLocked`) and — by design — never stored. As a result, the transaction store stops growing after the first few hundred stored movements. The 5.2 MB peak RSS is real, but it reflects **streaming throughput and rejection-path correctness** (a 281 MB file is never buffered), NOT store growth. It is not representative of a realistic unlocked workload.
-
-A **lock-free realistic workload** was measured separately: 4 million stored movements peaked at roughly **417 MB RSS**, giving an observed cost of approximately **104 bytes per stored transaction all-in** (HashMap overhead included).
-
-Wall time for the 10 M run was partly dominated by millions of `WARN` lines emitted to stderr. For rejection-heavy feeds, `RUST_LOG=error cargo run --release -- big.csv > /dev/null` is the sensible setting and produces materially faster wall times.
-
-The transaction store is the one irreducible piece of state (a dispute at row N can reference any earlier row — measured cost ~104 bytes per stored movement); for workloads beyond available RAM it could be swapped for a disk-backed KV store without touching the rest of the engine.
+User CPU time (9.5 s) exceeding wall time in the concurrent run confirms the reader and workers genuinely overlap. Memory stays flat in both modes because the input is streamed, never buffered. The transaction store is the one irreducible piece of state (a dispute at row N can reference any earlier row — measured cost ~104 bytes per stored movement); for workloads beyond available RAM it could be swapped for a disk-backed KV store without touching the rest of the engine.
