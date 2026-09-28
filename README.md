@@ -216,8 +216,8 @@ This property is the ordering guarantee: if sharding ever violated per-client FI
 
 Measured on the reference machine — the 5-million-row figure via `cargo test --release --test stress -- --ignored`, the 10-million-row figures via a manual run of the release binary against a minted CSV at the epoch gate:
 
-- **5 million rows**: 2.6 s
-- **10 million rows (281 MB input)**: 19.2 s
+- **5 million rows**: 2.6 s (sequential reference)
+- **10 million rows (281 MB input)**: 19.2 s sequential with default logging; **7.7 s with the shipped sharded runtime** (`RUST_LOG=error`), whose user CPU time (9.5 s) exceeding wall time confirms the reader and the four workers genuinely overlap. Peak RSS stays ~6 MB in both modes.
 
 **What the 10 M run actually measures — be honest about it.**
 The synthetic workload uses 200 clients with ~2% chargebacks. Because chargebacks lock accounts, all 200 accounts lock early in the stream; roughly 98% of subsequent deposit and withdrawal rows are rejected (`AccountLocked`) and — by design — never stored. As a result, the transaction store stops growing after the first few hundred stored movements. The 5.2 MB peak RSS is real, but it reflects **streaming throughput and rejection-path correctness** (a 281 MB file is never buffered), NOT store growth. It is not representative of a realistic unlocked workload.
