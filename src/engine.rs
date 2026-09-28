@@ -8,6 +8,10 @@ enum DisputeState {
     ChargedBack,
 }
 
+/// Deliberately does not record whether the movement was a deposit or a
+/// withdrawal: disputes apply the same hold formula to both, so the engine
+/// never consults the direction. A system needing type-aware dispute math
+/// or a historical audit trail would add it here.
 #[derive(Debug)]
 struct TxRecord {
     client: u16,
