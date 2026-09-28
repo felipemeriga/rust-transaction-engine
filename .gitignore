@@ -10,6 +10,3 @@ screenshots/
 
 # local working documents — not part of the deliverable
 docs/superpowers/
-
-# conversation exports — NDA-sensitive, never commit
-*.txt
