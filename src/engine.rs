@@ -34,6 +34,12 @@ impl Engine {
         self.accounts.iter().map(|(c, a)| (*c, a))
     }
 
+    /// Merge an account from another shard into this engine.
+    /// Used to combine engines from sharded workers.
+    pub fn merge_account(&mut self, client: u16, account: &Account) {
+        self.accounts.insert(client, *account);
+    }
+
     pub fn process(&mut self, t: Transaction) -> Result<(), Rejection> {
         match t {
             Transaction::Deposit { client, tx, amount } => {
