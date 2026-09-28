@@ -1,12 +1,1 @@
 /target
-
-# NDA: challenge spec must never be committed (no derivatives of the test file)
-CHALLENGE.md
-
-# local-only files — never commit (public repo; .npmrc holds a live token)
-.npmrc
-.DS_Store
-screenshots/
-
-# local working documents — not part of the deliverable
-docs/superpowers/
