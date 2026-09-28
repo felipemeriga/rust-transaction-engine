@@ -72,11 +72,7 @@ impl TryFrom<RawRecord> for Transaction {
             }
             Ok(parsed)
         };
-        // Spec premise 8: verdicts carry no amount; a present value is tolerated noise.
-        if amount.is_some() && !matches!(r.kind.trim(), "deposit" | "withdrawal") {
-            log::warn!("tx {tx}: amount on {} row ignored", r.kind.trim());
-        }
-
+        // Verdict rows carry no amount; a present value is silently tolerated.
         match r.kind.trim() {
             "deposit" => Ok(Transaction::Deposit {
                 client,
