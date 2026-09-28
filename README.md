@@ -159,33 +159,13 @@ Any other combination (e.g. `chargeback` on `Undisputed`, `dispute` on `ChargedB
                                CSV → stdout
 ```
 
-The reader runs in a `spawn_blocking` task (it does blocking file I/O). The four worker tasks are async and drain their channels until the sender end is dropped, which happens automatically when the reader task returns.
+The design in brief:
 
-### Per-client ordering
-
-The specification is a single ordered CSV file. The only causal constraint is that a dispute must follow the deposit or withdrawal it references. That constraint is per-client: no cross-client causality exists because there are no transfers between accounts. Routing by `client % WORKERS` guarantees that all transactions for a given client land in the same worker's channel and are processed in the exact order they appeared in the file. A dispute-before-deposit race is impossible by construction.
-
-### Bounded channels and backpressure
-
-Each channel has capacity 1024. If a worker falls behind its reader, `blocking_send` blocks the reader task rather than buffering unboundedly. An unbounded channel would read the entire file into memory before any worker made progress — defeating the streaming design and blowing the RSS on large inputs. The bounded channel is the backpressure valve.
-
-### Modulo routing vs. consistent hashing
-
-Plain modulo (`client % 4`) is used because the number of workers (`WORKERS = 4`) is fixed for the lifetime of the process. Consistent hashing is only needed when the shard count can change at runtime (e.g. when workers can be added or removed without draining). For a single-process, fixed-topology job, modulo is correct and cheaper.
-
-### Join-then-write
-
-Output is written only after all workers have completed. This is semantically forced: the output is the *final* ledger state, and the ledger state is only final when all transactions have been processed. Writing during processing would require synchronisation around every account mutation.
-
-### The honest boundary: cross-stream same-client ordering
-
-The sharded runtime preserves per-client order within a single input stream. It cannot extend that guarantee across multiple input streams (e.g. two files consumed concurrently, or two Kafka partitions for the same client arriving at different rates). Ensuring that all transactions for client X arrive in causal order when they originate from multiple upstream sources requires an upstream sequencing authority — for example, a Kafka topic keyed by `client_id`, which guarantees partition-level FIFO. There is no consumer-side fix for out-of-order cross-stream delivery.
-
-### Replay idempotency
-
-The engine's rejection logic makes at-least-once redelivery converge safely. A duplicate transaction ID is rejected with `Rejection::DuplicateTransactionId` (no state change). An already-disputed transaction rejects a second dispute. A charged-back transaction rejects all further verdicts. Replaying any previously-processed row produces the same final state as processing it once.
-
-**Per-shard scope caveat (sharded runtime only).** Duplicate-tx-id rejection is enforced within each shard's `Engine` independently. A transaction ID reused across two *different* clients that happen to land on *different* shards would be accepted by both shards — the sequential reference would reject the second. This edge case is unreachable for conforming input: the specification guarantees globally unique transaction IDs across all clients. The practical idempotency case — a same-client row replayed from an upstream queue — always routes to the same shard (routing is `client % WORKERS`) and is still correctly rejected.
+- **Per-client ordering by construction.** The only causal constraint in the data is per-client (a dispute must follow the movement it references; there are no transfers between accounts). Routing by `client % WORKERS` puts every transaction for a client into the same FIFO channel, consumed by a single worker — a dispute-before-deposit race is impossible, no locks needed. No state is shared: each `Engine` is moved into its worker and returned by value.
+- **Bounded channels are the backpressure valve.** Capacity 1024; a lagging worker blocks the reader instead of buffering the file into memory. Plain modulo (not consistent hashing) suffices because the worker count is fixed per process.
+- **Join, then write.** Output is the *final* ledger state, so the single writer runs only after all workers drain (reader EOF drops the senders, closing the channels).
+- **Boundary:** per-client order is preserved within one input stream; across multiple streams it requires an upstream sequencing authority (e.g. Kafka keyed by `client_id`) — no consumer-side fix exists.
+- **Replay idempotency:** duplicate IDs, re-disputes, and post-chargeback verdicts are all rejected without state change, so at-least-once redelivery converges. One scope note: duplicate-ID rejection is per-shard, so an ID reused across *different clients* on different shards would pass where the sequential reference rejects it — unreachable for conforming input (the spec guarantees globally unique IDs), and same-client replays always land on the same shard and are still rejected.
 
 ---
 
