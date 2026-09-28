@@ -67,7 +67,60 @@ impl Engine {
                 );
                 Ok(())
             }
-            _ => unimplemented!("verdicts land in the next commit"),
+            Transaction::Dispute { client, tx } => {
+                let (record, account) = self.referenced(client, tx)?;
+                match record.state {
+                    DisputeState::Disputed => Err(Rejection::AlreadyDisputed(tx)),
+                    DisputeState::ChargedBack => Err(Rejection::TransactionChargedBack(tx)),
+                    DisputeState::Undisputed => {
+                        account.available = account
+                            .available
+                            .checked_sub(record.amount)
+                            .ok_or(Rejection::Overflow(tx))?;
+                        account.held = account
+                            .held
+                            .checked_add(record.amount)
+                            .ok_or(Rejection::Overflow(tx))?;
+                        record.state = DisputeState::Disputed;
+                        Ok(())
+                    }
+                }
+            }
+            Transaction::Resolve { client, tx } => {
+                let (record, account) = self.referenced(client, tx)?;
+                match record.state {
+                    DisputeState::Undisputed => Err(Rejection::NotUnderDispute(tx)),
+                    DisputeState::ChargedBack => Err(Rejection::TransactionChargedBack(tx)),
+                    DisputeState::Disputed => {
+                        account.held = account
+                            .held
+                            .checked_sub(record.amount)
+                            .ok_or(Rejection::Overflow(tx))?;
+                        account.available = account
+                            .available
+                            .checked_add(record.amount)
+                            .ok_or(Rejection::Overflow(tx))?;
+                        record.state = DisputeState::Undisputed;
+                        Ok(())
+                    }
+                }
+            }
+            Transaction::Chargeback { client, tx } => {
+                let (record, account) = self.referenced(client, tx)?;
+                match record.state {
+                    DisputeState::Undisputed => Err(Rejection::NotUnderDispute(tx)),
+                    DisputeState::ChargedBack => Err(Rejection::TransactionChargedBack(tx)),
+                    DisputeState::Disputed => {
+                        account.held = account
+                            .held
+                            .checked_sub(record.amount)
+                            .ok_or(Rejection::Overflow(tx))?;
+                        account.locked = true;
+                        record.state = DisputeState::ChargedBack;
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 
@@ -82,6 +135,27 @@ impl Engine {
             return Err(Rejection::DuplicateTransactionId(tx));
         }
         Ok(account)
+    }
+
+    /// Shared gate for partner verdicts: the referenced tx must exist and belong
+    /// to the row's client. Locked accounts still process verdicts (premise 4).
+    fn referenced(
+        &mut self,
+        client: u16,
+        tx: u32,
+    ) -> Result<(&mut TxRecord, &mut Account), Rejection> {
+        let record = self
+            .txs
+            .get_mut(&tx)
+            .ok_or(Rejection::UnknownTransaction(tx))?;
+        if record.client != client {
+            return Err(Rejection::ClientMismatch { tx, client });
+        }
+        let account = self
+            .accounts
+            .get_mut(&record.client)
+            .expect("invariant: storing a tx always created its account first");
+        Ok((record, account))
     }
 }
 
@@ -124,6 +198,172 @@ mod tests {
             .find(|(c, _)| *c == client)
             .map(|(_, a)| *a)
             .unwrap()
+    }
+
+    pub(crate) fn verdict(
+        e: &mut Engine,
+        kind: &str,
+        client: u16,
+        tx: u32,
+    ) -> Result<(), Rejection> {
+        e.process(match kind {
+            "dispute" => Transaction::Dispute { client, tx },
+            "resolve" => Transaction::Resolve { client, tx },
+            _ => Transaction::Chargeback { client, tx },
+        })
+    }
+
+    #[test]
+    fn dispute_holds_funds() {
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        let a = account(&e, 1);
+        assert_eq!(
+            (a.available, a.held, a.total()),
+            (Amount::ZERO, amt("10"), amt("10"))
+        );
+    }
+
+    #[test]
+    fn resolve_is_a_perfect_undo_and_reopens() {
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        verdict(&mut e, "resolve", 1, 1).unwrap();
+        let a = account(&e, 1);
+        assert_eq!(
+            (a.available, a.held, a.locked),
+            (amt("10"), Amount::ZERO, false)
+        );
+        // resolve returns the tx to Undisputed: it can be disputed again
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        assert_eq!(account(&e, 1).held, amt("10"));
+    }
+
+    #[test]
+    fn chargeback_removes_funds_and_locks() {
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        verdict(&mut e, "chargeback", 1, 1).unwrap();
+        let a = account(&e, 1);
+        assert_eq!(
+            (a.available, a.held, a.total(), a.locked),
+            (Amount::ZERO, Amount::ZERO, Amount::ZERO, true)
+        );
+    }
+
+    #[test]
+    fn fraud_scenario_ends_negative_and_locked() {
+        // deposit 10 → withdraw 10 → dispute the deposit → chargeback
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        withdraw(&mut e, 1, 2, "10").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        let mid = account(&e, 1);
+        assert_eq!(
+            (mid.available, mid.held, mid.total()),
+            (amt("-10"), amt("10"), Amount::ZERO)
+        );
+        verdict(&mut e, "chargeback", 1, 1).unwrap();
+        let a = account(&e, 1);
+        assert_eq!(
+            (a.available, a.total(), a.locked),
+            (amt("-10"), amt("-10"), true)
+        );
+    }
+
+    #[test]
+    fn withdrawal_dispute_uses_literal_spec_math() {
+        // premise 1: both movement types disputable, same formula
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        withdraw(&mut e, 1, 2, "4").unwrap();
+        verdict(&mut e, "dispute", 1, 2).unwrap();
+        let a = account(&e, 1);
+        assert_eq!(
+            (a.available, a.held, a.total()),
+            (amt("2"), amt("4"), amt("6"))
+        );
+    }
+
+    #[test]
+    fn reopened_dispute_can_charge_back() {
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        verdict(&mut e, "resolve", 1, 1).unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        verdict(&mut e, "chargeback", 1, 1).unwrap();
+        let a = account(&e, 1);
+        assert_eq!((a.total(), a.locked), (Amount::ZERO, true));
+    }
+
+    #[test]
+    fn locked_account_rejects_movements_but_processes_verdicts() {
+        // premise 4
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        deposit(&mut e, 1, 2, "5").unwrap();
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        verdict(&mut e, "chargeback", 1, 1).unwrap();
+        assert_eq!(
+            deposit(&mut e, 1, 3, "99"),
+            Err(Rejection::AccountLocked(1))
+        );
+        assert_eq!(
+            withdraw(&mut e, 1, 4, "1"),
+            Err(Rejection::AccountLocked(1))
+        );
+        verdict(&mut e, "dispute", 1, 2).unwrap();
+        verdict(&mut e, "chargeback", 1, 2).unwrap();
+        let a = account(&e, 1);
+        assert_eq!((a.total(), a.locked), (Amount::ZERO, true));
+    }
+
+    #[test]
+    fn verdict_rejections() {
+        let mut e = Engine::new();
+        deposit(&mut e, 1, 1, "10").unwrap();
+        assert_eq!(
+            verdict(&mut e, "dispute", 1, 99),
+            Err(Rejection::UnknownTransaction(99))
+        );
+        assert_eq!(
+            verdict(&mut e, "dispute", 2, 1),
+            Err(Rejection::ClientMismatch { tx: 1, client: 2 })
+        );
+        assert_eq!(
+            verdict(&mut e, "resolve", 1, 1),
+            Err(Rejection::NotUnderDispute(1))
+        );
+        assert_eq!(
+            verdict(&mut e, "chargeback", 1, 1),
+            Err(Rejection::NotUnderDispute(1))
+        );
+        verdict(&mut e, "dispute", 1, 1).unwrap();
+        assert_eq!(
+            verdict(&mut e, "dispute", 1, 1),
+            Err(Rejection::AlreadyDisputed(1))
+        );
+        verdict(&mut e, "chargeback", 1, 1).unwrap();
+        for kind in ["dispute", "resolve", "chargeback"] {
+            assert_eq!(
+                verdict(&mut e, kind, 1, 1),
+                Err(Rejection::TransactionChargedBack(1))
+            );
+        }
+    }
+
+    #[test]
+    fn verdict_never_creates_account() {
+        let mut e = Engine::new();
+        assert_eq!(
+            verdict(&mut e, "dispute", 5, 1),
+            Err(Rejection::UnknownTransaction(1))
+        );
+        assert_eq!(e.accounts().count(), 0);
     }
 
     #[test]
