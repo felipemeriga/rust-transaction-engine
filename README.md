@@ -97,7 +97,7 @@ runtime::run_sharded(impl Read) → Vec<Engine>   // sharded async runtime
 testgen::generate(rows, seed, impl Write) → io::Result<()>
 ```
 
-The CLI (`src/main.rs`) calls `run_sharded`, collects the resulting `Vec<Engine>`, flattens their `accounts()` iterators, and writes to stdout. It is eleven lines.
+The CLI (`src/main.rs`) calls `run_sharded`, collects the resulting `Vec<Engine>`, flattens their `accounts()` iterators, and writes to stdout — a couple dozen lines with no business logic of its own.
 
 ### `Amount(i64)` and why no floats
 
@@ -191,18 +191,19 @@ The engine's rejection logic makes at-least-once redelivery converge safely. A d
 
 ### Test inventory
 
-The test suite has 43 tests across six modules:
+The test suite has 43 tests: `cargo test` runs 42 (28 unit, 14 integration) and one `#[ignore]`d stress test runs at epoch gates.
 
-| Module | Coverage |
-|--------|----------|
-| `amount` | `parse_valid` / `parse_invalid` (12 cases each), `display_four_decimals`, `checked_ops` |
-| `transaction` | valid movements and verdicts, superfluous amount tolerated, `client()` accessor, every `RowError` variant |
-| `engine` | every `Rejection` variant, deposit/withdrawal arithmetic, all dispute state transitions including `reopened_dispute_can_charge_back`, `fraud_scenario_ends_negative_and_locked`, `withdrawal_dispute_uses_literal_spec_math`, `locked_account_rejects_movements_but_processes_verdicts`, `failed_withdrawal_creates_account`, `verdict_never_creates_account` |
-| `io` | `reads_and_skips_malformed_rows`, `empty_input`, `end_to_end_sequential` |
-| `acceptance` (integration) | 9 fixture scenarios (see below) |
-| `equivalence` (integration) | sharded ≡ sequential property (see below) |
-
-The `stress` integration test (`five_million_rows_stream_through`) is `#[ignore]` and runs at epoch gates via `cargo test --release --test stress -- --ignored`.
+| Module | Tests | Coverage |
+|--------|-------|----------|
+| `amount` | 4 | `parse_valid` (8 cases), `parse_invalid` (11 cases), `display_four_decimals`, `checked_ops` |
+| `transaction` | 4 | valid movements and verdicts, superfluous amount tolerated, `client()` accessor, every `RowError` variant |
+| `engine` | 15 | all ledger-rule `Rejection` variants (`Overflow` is exercised at the `Amount` layer via `checked_ops`), deposit/withdrawal arithmetic, all dispute state transitions including `reopened_dispute_can_charge_back`, `fraud_scenario_ends_negative_and_locked`, `withdrawal_dispute_uses_literal_spec_math`, `locked_account_rejects_movements_but_processes_verdicts`, `failed_withdrawal_creates_account`, `verdict_never_creates_account` |
+| `io` | 3 | `reads_and_skips_malformed_rows`, `empty_input`, `end_to_end_sequential` |
+| `testgen` | 2 | same seed produces identical bytes; generated output is processable and exercises disputes (open holds and locked accounts occur) |
+| `acceptance` (integration) | 9 | 9 fixture scenarios (see below) |
+| `cli` (integration) | 3 | binary contract: CSV to stdout on success, stdout stays empty on missing argument and on unreadable file |
+| `equivalence` (integration) | 2 | sharded ≡ sequential property (see below) |
+| `stress` (integration) | 1 | `#[ignore]`d big-file smoke (`five_million_rows_stream_through`), run at epoch gates via `cargo test --release --test stress -- --ignored` |
 
 ### Nine fixture scenarios
 
@@ -231,7 +232,7 @@ This property is the ordering guarantee: if sharding ever violated per-client FI
 
 ### Stress run numbers (Epoch 4 gate)
 
-Measured on the reference machine with `cargo test --release --test stress -- --ignored`:
+Measured on the reference machine — the 5-million-row figure via `cargo test --release --test stress -- --ignored`, the 10-million-row figures via a manual run of the release binary against a minted CSV at the epoch gate:
 
 - **5 million rows**: 2.6 s
 - **10 million rows (281 MB input)**: 19.2 s, **5.2 MB peak RSS**
