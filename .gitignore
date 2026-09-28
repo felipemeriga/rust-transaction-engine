@@ -1,0 +1,4 @@
+/target
+
+# NDA: challenge spec must never be committed (no derivatives of the test file)
+CHALLENGE.md
