@@ -1,5 +1,6 @@
 use anyhow::Context;
-use rust_transaction_engine::io::{run_sequential, write_accounts};
+use rust_transaction_engine::io::write_accounts;
+use rust_transaction_engine::runtime::run_sharded;
 use std::fs::File;
 
 fn main() -> anyhow::Result<()> {
@@ -10,7 +11,13 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .context("usage: cargo run -- <transactions.csv>")?;
     let file = File::open(&path).with_context(|| format!("cannot open {path}"))?;
-    let engine = run_sequential(file);
-    write_accounts(engine.accounts(), std::io::stdout().lock())?;
+    let engines = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run_sharded(file));
+    write_accounts(
+        engines.iter().flat_map(|e| e.accounts()),
+        std::io::stdout().lock(),
+    )?;
     Ok(())
 }
