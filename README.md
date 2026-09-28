@@ -226,26 +226,4 @@ A **lock-free realistic workload** was measured separately: 4 million stored mov
 
 Wall time for the 10 M run was partly dominated by millions of `WARN` lines emitted to stderr. For rejection-heavy feeds, `RUST_LOG=error cargo run --release -- big.csv > /dev/null` is the sensible setting and produces materially faster wall times.
 
----
-
-## Scaling Ceiling
-
-### Transaction store memory
-
-Every successfully committed movement (deposit or withdrawal) stores a `TxRecord`: `client: u16` (2 bytes) + `amount: i64` (8 bytes) + `DisputeState: u8` (1 byte) + HashMap overhead. Measured at scale (4 M stored movements, lock-free workload) the all-in cost is approximately **104 bytes per stored transaction**:
-
-| Movements | Approximate RSS |
-|-----------|----------------|
-| 1 million | ~104 MB |
-| 10 million | ~1 GB |
-| 100 million | ~10 GB |
-
-The transaction store is irreducible state: a dispute arriving at row N could reference any earlier row, so records cannot be evicted without closing the dispute window.
-
-### Escape hatch: disk-backed KV
-
-For workloads exceeding available RAM, the `txs: HashMap<u32, TxRecord>` can be replaced with a disk-backed key-value store (e.g. RocksDB via the `rocksdb` crate). The rest of the engine is unchanged because the only access pattern is point get and point insert — both map cleanly onto KV semantics. The accounts map is much smaller (one entry per client) and stays in memory.
-
-### What was deliberately not implemented: two-pass pre-scan
-
-A two-pass approach — first scan to find all disputed IDs, second pass to process — was considered and rejected. It requires the entire input to be seekable (breaks piped or streamed input), doubles I/O, and still does not bound memory if the number of disputed transactions is large. The streaming single-pass design is strictly better for the target use case.
+The transaction store is the one irreducible piece of state (a dispute at row N can reference any earlier row — measured cost ~104 bytes per stored movement); for workloads beyond available RAM it could be swapped for a disk-backed KV store without touching the rest of the engine.
