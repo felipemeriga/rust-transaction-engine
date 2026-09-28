@@ -7,7 +7,7 @@ fn bin() -> Command {
 #[test]
 fn processes_file_and_prints_csv_to_stdout() {
     let dir = std::env::temp_dir();
-    let input = dir.join("cli_test_input.csv");
+    let input = dir.join(format!("cli_test_input_{}.csv", std::process::id()));
     std::fs::write(
         &input,
         "type, client, tx, amount\ndeposit, 1, 1, 3.0\nwithdrawal, 1, 2, 1.0\n",
