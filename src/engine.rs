@@ -73,14 +73,16 @@ impl Engine {
                     DisputeState::Disputed => Err(Rejection::AlreadyDisputed(tx)),
                     DisputeState::ChargedBack => Err(Rejection::TransactionChargedBack(tx)),
                     DisputeState::Undisputed => {
-                        account.available = account
+                        let new_available = account
                             .available
                             .checked_sub(record.amount)
                             .ok_or(Rejection::Overflow(tx))?;
-                        account.held = account
+                        let new_held = account
                             .held
                             .checked_add(record.amount)
                             .ok_or(Rejection::Overflow(tx))?;
+                        account.available = new_available;
+                        account.held = new_held;
                         record.state = DisputeState::Disputed;
                         Ok(())
                     }
@@ -92,14 +94,16 @@ impl Engine {
                     DisputeState::Undisputed => Err(Rejection::NotUnderDispute(tx)),
                     DisputeState::ChargedBack => Err(Rejection::TransactionChargedBack(tx)),
                     DisputeState::Disputed => {
-                        account.held = account
+                        let new_held = account
                             .held
                             .checked_sub(record.amount)
                             .ok_or(Rejection::Overflow(tx))?;
-                        account.available = account
+                        let new_available = account
                             .available
                             .checked_add(record.amount)
                             .ok_or(Rejection::Overflow(tx))?;
+                        account.held = new_held;
+                        account.available = new_available;
                         record.state = DisputeState::Undisputed;
                         Ok(())
                     }
