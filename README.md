@@ -185,6 +185,8 @@ The sharded runtime preserves per-client order within a single input stream. It 
 
 The engine's rejection logic makes at-least-once redelivery converge safely. A duplicate transaction ID is rejected with `Rejection::DuplicateTransactionId` (no state change). An already-disputed transaction rejects a second dispute. A charged-back transaction rejects all further verdicts. Replaying any previously-processed row produces the same final state as processing it once.
 
+**Per-shard scope caveat (sharded runtime only).** Duplicate-tx-id rejection is enforced within each shard's `Engine` independently. A transaction ID reused across two *different* clients that happen to land on *different* shards would be accepted by both shards — the sequential reference would reject the second. This edge case is unreachable for conforming input: the specification guarantees globally unique transaction IDs across all clients. The practical idempotency case — a same-client row replayed from an upstream queue — always routes to the same shard (routing is `client % WORKERS`) and is still correctly rejected.
+
 ---
 
 ## Correctness
@@ -235,9 +237,14 @@ This property is the ordering guarantee: if sharding ever violated per-client FI
 Measured on the reference machine — the 5-million-row figure via `cargo test --release --test stress -- --ignored`, the 10-million-row figures via a manual run of the release binary against a minted CSV at the epoch gate:
 
 - **5 million rows**: 2.6 s
-- **10 million rows (281 MB input)**: 19.2 s, **5.2 MB peak RSS**
+- **10 million rows (281 MB input)**: 19.2 s
 
-The low RSS confirms the streaming design: the file is never fully loaded into memory. Per-row work is dominated by hash-map lookups, so a single sequential file is largely I/O-bound; the sharded runtime demonstrates the server-shaped design rather than accelerating single-file throughput.
+**What the 10 M run actually measures — be honest about it.**
+The synthetic workload uses 200 clients with ~2% chargebacks. Because chargebacks lock accounts, all 200 accounts lock early in the stream; roughly 98% of subsequent deposit and withdrawal rows are rejected (`AccountLocked`) and — by design — never stored. As a result, the transaction store stops growing after the first few hundred stored movements. The 5.2 MB peak RSS is real, but it reflects **streaming throughput and rejection-path correctness** (a 281 MB file is never buffered), NOT store growth. It is not representative of a realistic unlocked workload.
+
+A **lock-free realistic workload** was measured separately: 4 million stored movements peaked at roughly **417 MB RSS**, giving an observed cost of approximately **104 bytes per stored transaction all-in** (HashMap overhead included).
+
+Wall time for the 10 M run was partly dominated by millions of `WARN` lines emitted to stderr. For rejection-heavy feeds, `RUST_LOG=error cargo run --release -- big.csv > /dev/null` is the sensible setting and produces materially faster wall times.
 
 ---
 
@@ -245,13 +252,13 @@ The low RSS confirms the streaming design: the file is never fully loaded into m
 
 ### Transaction store memory
 
-Every successfully committed movement (deposit or withdrawal) stores a `TxRecord`: `client: u16` (2 bytes) + `amount: i64` (8 bytes) + `DisputeState: u8` (1 byte) + HashMap overhead ≈ 30–40 bytes per entry. At that rate:
+Every successfully committed movement (deposit or withdrawal) stores a `TxRecord`: `client: u16` (2 bytes) + `amount: i64` (8 bytes) + `DisputeState: u8` (1 byte) + HashMap overhead. Measured at scale (4 M stored movements, lock-free workload) the all-in cost is approximately **104 bytes per stored transaction**:
 
 | Movements | Approximate RSS |
 |-----------|----------------|
-| 1 million | ~35 MB |
-| 10 million | ~350 MB |
-| 100 million | ~3.5 GB |
+| 1 million | ~104 MB |
+| 10 million | ~1 GB |
+| 100 million | ~10 GB |
 
 The transaction store is irreducible state: a dispute arriving at row N could reference any earlier row, so records cannot be evicted without closing the dispute window.
 
